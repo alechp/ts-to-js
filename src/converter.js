@@ -6,47 +6,284 @@ import { transformFromAstSync } from '@babel/core';
 import transformTypescript from '@babel/plugin-transform-typescript';
 import getBabelOptions from 'recast/parsers/_babel_options.js';
 import { parser } from 'recast/parsers/babel.js';
+const traverse = require('@babel/traverse').default;
+const generate = require('@babel/generator').default;
+const t = require('@babel/types');
 
 export async function convertDirectory(dirPath) {
   const files = await glob('**/*.{ts,tsx,astro}', { cwd: dirPath, ignore: await getIgnorePatterns(dirPath) });
+  const errors = [];
 
   for (const file of files) {
     const filePath = path.join(dirPath, file);
-    await convertFile(filePath);
+    try {
+      await convertFile(filePath);
+      console.log(`Successfully converted: ${filePath}`);
+    } catch (error) {
+      console.error(`Error converting ${filePath}: ${error.message}`);
+      errors.push({ file: filePath, error: error.message });
+    }
   }
 
   await removeEnvDTs(dirPath);
   await convertJsConfigToTsConfig(dirPath);
+
+  if (errors.length > 0) {
+    console.error('\nConversion completed with errors:');
+    errors.forEach(({ file, error }) => {
+      console.error(`  ${file}: ${error}`);
+    });
+  } else {
+    console.log('\nAll files converted successfully!');
+  }
 }
 
 async function convertFile(filePath) {
-  const content = await fs.readFile(filePath, 'utf-8');
-  const ast = parse(content, {
-    parser: {
-      parse: (source, options) => {
-        const babelOptions = getBabelOptions(options);
-        babelOptions.plugins.push('typescript', 'jsx');
-        return parser.parse(source, babelOptions);
-      }
+  const content = await fs.readFile(filePath, 'utf8');
+
+  if (filePath.endsWith('.astro')) {
+    // Handle .astro files
+    const parts = content.split('---');
+    if (parts.length >= 3) {
+      const frontmatter = parts[1];
+      const template = parts.slice(2).join('---');
+      const convertedFrontmatter = await convertAstroFrontmatter(frontmatter);
+      return `---\n${convertedFrontmatter}\n---\n${template}`;
     }
-  });
+    return content; // If no frontmatter or unexpected format, return unchanged
+  }
 
-  const options = {
-    cloneInputAst: false,
-    code: false,
-    ast: true,
-    plugins: [transformTypescript],
-    configFile: false
-  };
+  // Handle other file types
+  try {
+    const ast = parser.parse(content, {
+      sourceType: 'module',
+      plugins: ['typescript', 'jsx'],
+    });
 
-  const { ast: transformedAST } = transformFromAstSync(ast, content, options);
-  const result = print(transformedAST).code;
+    traverse(ast, {
+      ImportDeclaration(path) {
+        // Convert import statements
+        const specifiers = path.node.specifiers;
+        const source = path.node.source.value;
 
-  const newFilePath = filePath.replace(/\.ts(x)?$/, '.js$1');
-  await fs.writeFile(newFilePath, result);
+        if (specifiers.length === 0) {
+          // Side-effect import, leave as is
+          return;
+        }
 
-  if (filePath !== newFilePath) {
-    await fs.unlink(filePath);
+        const defaultSpecifier = specifiers.find(s => t.isImportDefaultSpecifier(s));
+        const namedSpecifiers = specifiers.filter(s => t.isImportSpecifier(s));
+
+        if (defaultSpecifier && namedSpecifiers.length === 0) {
+          // Default import only
+          path.replaceWith(
+            t.variableDeclaration('const', [
+              t.variableDeclarator(
+                defaultSpecifier.local,
+                t.callExpression(
+                  t.identifier('require'),
+                  [t.stringLiteral(source)]
+                )
+              )
+            ])
+          );
+        } else if (namedSpecifiers.length > 0) {
+          // Named imports (with or without default)
+          const objectPattern = t.objectPattern(
+            namedSpecifiers.map(s =>
+              t.objectProperty(
+                t.identifier(s.imported.name),
+                t.identifier(s.local.name),
+                false,
+                s.imported.name === s.local.name
+              )
+            )
+          );
+
+          let declaration;
+          if (defaultSpecifier) {
+            declaration = t.variableDeclaration('const', [
+              t.variableDeclarator(
+                t.objectPattern([
+                  t.objectProperty(
+                    t.identifier('default'),
+                    defaultSpecifier.local
+                  ),
+                  t.restElement(objectPattern)
+                ]),
+                t.callExpression(
+                  t.identifier('require'),
+                  [t.stringLiteral(source)]
+                )
+              )
+            ]);
+          } else {
+            declaration = t.variableDeclaration('const', [
+              t.variableDeclarator(
+                objectPattern,
+                t.callExpression(
+                  t.identifier('require'),
+                  [t.stringLiteral(source)]
+                )
+              )
+            ]);
+          }
+
+          path.replaceWith(declaration);
+        }
+      },
+      ExportDefaultDeclaration(path) {
+        // Convert export default to module.exports
+        path.replaceWith(
+          t.expressionStatement(
+            t.assignmentExpression(
+              '=',
+              t.memberExpression(
+                t.identifier('module'),
+                t.identifier('exports')
+              ),
+              path.node.declaration
+            )
+          )
+        );
+      },
+      ExportNamedDeclaration(path) {
+        // Convert named exports to module.exports.x = x
+        if (path.node.declaration) {
+          const declarations = path.get('declaration').node.declarations;
+          const exportStatements = declarations.map(d =>
+            t.expressionStatement(
+              t.assignmentExpression(
+                '=',
+                t.memberExpression(
+                  t.memberExpression(
+                    t.identifier('module'),
+                    t.identifier('exports')
+                  ),
+                  t.identifier(d.id.name)
+                ),
+                t.identifier(d.id.name)
+              )
+            )
+          );
+          path.replaceWithMultiple([
+            path.node.declaration,
+            ...exportStatements
+          ]);
+        } else if (path.node.specifiers) {
+          const exportStatements = path.node.specifiers.map(s =>
+            t.expressionStatement(
+              t.assignmentExpression(
+                '=',
+                t.memberExpression(
+                  t.memberExpression(
+                    t.identifier('module'),
+                    t.identifier('exports')
+                  ),
+                  t.identifier(s.exported.name)
+                ),
+                t.identifier(s.local.name)
+              )
+            )
+          );
+          path.replaceWithMultiple(exportStatements);
+        }
+      }
+    });
+
+    return generate(ast, {}, content).code;
+  } catch (error) {
+    console.error(`Error converting file ${filePath}: ${error.message}`);
+    return content; // Return original content if conversion fails
+  }
+}
+
+async function convertAstroFrontmatter(frontmatter) {
+  try {
+    const ast = parser.parse(frontmatter, {
+      sourceType: 'module',
+      plugins: ['typescript', 'jsx'],
+    });
+
+    traverse(ast, {
+      ImportDeclaration(path) {
+        // Convert import statements in frontmatter
+        const specifiers = path.node.specifiers;
+        const source = path.node.source.value;
+
+        if (specifiers.length === 0) {
+          // Side-effect import, leave as is
+          return;
+        }
+
+        const defaultSpecifier = specifiers.find(s => t.isImportDefaultSpecifier(s));
+        const namedSpecifiers = specifiers.filter(s => t.isImportSpecifier(s));
+
+        if (defaultSpecifier && namedSpecifiers.length === 0) {
+          // Default import only
+          path.replaceWith(
+            t.variableDeclaration('const', [
+              t.variableDeclarator(
+                defaultSpecifier.local,
+                t.callExpression(
+                  t.identifier('require'),
+                  [t.stringLiteral(source)]
+                )
+              )
+            ])
+          );
+        } else if (namedSpecifiers.length > 0) {
+          // Named imports (with or without default)
+          const objectPattern = t.objectPattern(
+            namedSpecifiers.map(s =>
+              t.objectProperty(
+                t.identifier(s.imported.name),
+                t.identifier(s.local.name),
+                false,
+                s.imported.name === s.local.name
+              )
+            )
+          );
+
+          let declaration;
+          if (defaultSpecifier) {
+            declaration = t.variableDeclaration('const', [
+              t.variableDeclarator(
+                t.objectPattern([
+                  t.objectProperty(
+                    t.identifier('default'),
+                    defaultSpecifier.local
+                  ),
+                  t.restElement(objectPattern)
+                ]),
+                t.callExpression(
+                  t.identifier('require'),
+                  [t.stringLiteral(source)]
+                )
+              )
+            ]);
+          } else {
+            declaration = t.variableDeclaration('const', [
+              t.variableDeclarator(
+                objectPattern,
+                t.callExpression(
+                  t.identifier('require'),
+                  [t.stringLiteral(source)]
+                )
+              )
+            ]);
+          }
+
+          path.replaceWith(declaration);
+        }
+      },
+      // We don't handle exports in frontmatter as they're not typical
+    });
+
+    return generate(ast, {}, frontmatter).code;
+  } catch (error) {
+    console.error(`Error converting Astro frontmatter: ${error.message}`);
+    return frontmatter; // Return original frontmatter if conversion fails
   }
 }
 
@@ -78,3 +315,8 @@ async function getIgnorePatterns(dirPath) {
     return [];
   }
 }
+
+export {
+  convertFile,
+  convertAstroFrontmatter
+};
