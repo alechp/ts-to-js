@@ -1,9 +1,23 @@
 #!/bin/bash
 
-# Function to log styled messages
+# Create logs directory if it doesn't exist
+mkdir -p logs
+
+# Generate timestamp and log file name
+TIMESTAMP=$(date "+%Y-%m-%d_%H-%M-%S")
+LOG_FILE="logs/${TIMESTAMP}-setup-and-run.log"
+
+# Function to log styled messages and append to log file
 log() {
-    gum style --foreground 212 --border normal --margin "1 2" --padding "1 2" "$1"
+    local message="$1"
+    echo "[$(date "+%Y-%m-%d %H:%M:%S")] $message" >> "$LOG_FILE"
+    gum style --foreground 212 --border normal --margin "1 2" --padding "1 2" "$message"
 }
+
+# Redirect all output to log file and terminal
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+log "Script execution started. Logging to $LOG_FILE"
 
 # Step 1: Clean up and unzip in the sandbox directory
 log "Step 1: Cleaning up and unzipping in sandbox directory"
@@ -27,3 +41,5 @@ if [ $? -eq 0 ]; then
 else
     log "Failed to install dependencies. Please check for errors above."
 fi
+
+log "Script execution completed. Full log available at $LOG_FILE"

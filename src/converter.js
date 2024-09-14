@@ -58,6 +58,8 @@ async function convertFile(filePath) {
         const convertedFrontmatter = await convertAstroFrontmatter(frontmatter);
         newContent = `---\n${convertedFrontmatter}\n---\n${template}`;
       }
+      // Convert require to import in the entire file
+      newContent = newContent.replace(/const\s+(\w+)\s*=\s*require\(([^)]+)\);?/g, 'import $1 from $2;');
     } else if (filePath.endsWith('.ts') || filePath.endsWith('.tsx')) {
       // Handle .ts and .tsx files
       const ast = parser.parse(content, {
@@ -214,6 +216,30 @@ async function convertFile(filePath) {
             path.replaceWithMultiple(exportStatements);
           }
         },
+        CallExpression(path) {
+          if (path.node.callee.name === 'require') {
+            // Convert require to import
+            const importSpecifier = t.importDefaultSpecifier(path.parent.id);
+            const importDeclaration = t.importDeclaration(
+              [importSpecifier],
+              t.stringLiteral(path.node.arguments[0].value)
+            );
+            path.parentPath.parentPath.replaceWith(importDeclaration);
+          }
+        },
+        VariableDeclaration(path) {
+          if (path.node.declarations[0].init &&
+            path.node.declarations[0].init.type === 'CallExpression' &&
+            path.node.declarations[0].init.callee.name === 'require') {
+            // Handle const { x, y } = require('module') case
+            const moduleSpecifier = path.node.declarations[0].init.arguments[0].value;
+            const importSpecifiers = path.node.declarations[0].id.properties.map(prop =>
+              t.importSpecifier(t.identifier(prop.key.name), t.identifier(prop.key.name))
+            );
+            const importDeclaration = t.importDeclaration(importSpecifiers, t.stringLiteral(moduleSpecifier));
+            path.replaceWith(importDeclaration);
+          }
+        },
         TSTypeAnnotation(path) {
           // Remove type annotations
           path.remove();
@@ -238,12 +264,9 @@ async function convertFile(filePath) {
           // Convert parameter properties to regular parameters
           path.replaceWith(t.identifier(path.node.parameter.name));
         },
-        // New visitor for handling non-null assertions
         TSNonNullExpression(path) {
-          // Only remove the ! if it's used as a non-null assertion
-          if (t.isMemberExpression(path.parent) || t.isCallExpression(path.parent)) {
-            path.replaceWith(path.node.expression);
-          }
+          // Remove non-null assertions
+          path.replaceWith(path.node.expression);
         },
       });
 
@@ -334,6 +357,30 @@ async function convertAstroFrontmatter(frontmatter) {
           }
 
           path.replaceWith(declaration);
+        }
+      },
+      CallExpression(path) {
+        if (path.node.callee.name === 'require') {
+          // Convert require to import
+          const importSpecifier = t.importDefaultSpecifier(path.parent.id);
+          const importDeclaration = t.importDeclaration(
+            [importSpecifier],
+            t.stringLiteral(path.node.arguments[0].value)
+          );
+          path.parentPath.parentPath.replaceWith(importDeclaration);
+        }
+      },
+      VariableDeclaration(path) {
+        if (path.node.declarations[0].init &&
+          path.node.declarations[0].init.type === 'CallExpression' &&
+          path.node.declarations[0].init.callee.name === 'require') {
+          // Handle const { x, y } = require('module') case
+          const moduleSpecifier = path.node.declarations[0].init.arguments[0].value;
+          const importSpecifiers = path.node.declarations[0].id.properties.map(prop =>
+            t.importSpecifier(t.identifier(prop.key.name), t.identifier(prop.key.name))
+          );
+          const importDeclaration = t.importDeclaration(importSpecifiers, t.stringLiteral(moduleSpecifier));
+          path.replaceWith(importDeclaration);
         }
       },
       // We don't handle exports in frontmatter as they're not typical
