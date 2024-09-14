@@ -237,7 +237,14 @@ async function convertFile(filePath) {
         TSParameterProperty(path) {
           // Convert parameter properties to regular parameters
           path.replaceWith(t.identifier(path.node.parameter.name));
-        }
+        },
+        // New visitor for handling non-null assertions
+        TSNonNullExpression(path) {
+          // Only remove the ! if it's used as a non-null assertion
+          if (t.isMemberExpression(path.parent) || t.isCallExpression(path.parent)) {
+            path.replaceWith(path.node.expression);
+          }
+        },
       });
 
       newContent = generate(ast, {}, content).code;
