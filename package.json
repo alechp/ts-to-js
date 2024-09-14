@@ -1,0 +1,21 @@
+{
+  "name": "ts-to-js",
+  "module": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.js"
+  },
+  "dependencies": {
+    "@babel/core": "^7.23.9",
+    "@babel/plugin-transform-typescript": "^7.23.6",
+    "recast": "^0.23.4",
+    "glob": "^10.3.10",
+    "prompts": "^2.4.2"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
