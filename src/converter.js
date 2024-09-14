@@ -9,27 +9,48 @@ import { parser } from 'recast/parsers/babel.js';
 
 export async function convertDirectory(dirPath) {
   const files = await glob('**/*.{ts,tsx,astro}', { cwd: dirPath, ignore: await getIgnorePatterns(dirPath) });
+  const errors = [];
 
   for (const file of files) {
     const filePath = path.join(dirPath, file);
-    await convertFile(filePath);
+    try {
+      await convertFile(filePath);
+      console.log(`Successfully converted: ${filePath}`);
+    } catch (error) {
+      console.error(`Error converting ${filePath}: ${error.message}`);
+      errors.push({ file: filePath, error: error.message });
+    }
   }
 
   await removeEnvDTs(dirPath);
   await convertJsConfigToTsConfig(dirPath);
+
+  if (errors.length > 0) {
+    console.error('\nConversion completed with errors:');
+    errors.forEach(({ file, error }) => {
+      console.error(`  ${file}: ${error}`);
+    });
+  } else {
+    console.log('\nAll files converted successfully!');
+  }
 }
 
 async function convertFile(filePath) {
   const content = await fs.readFile(filePath, 'utf-8');
-  const ast = parse(content, {
-    parser: {
-      parse: (source, options) => {
-        const babelOptions = getBabelOptions(options);
-        babelOptions.plugins.push('typescript', 'jsx');
-        return parser.parse(source, babelOptions);
+  let ast;
+  try {
+    ast = parse(content, {
+      parser: {
+        parse: (source, options) => {
+          const babelOptions = getBabelOptions(options);
+          babelOptions.plugins.push('typescript', 'jsx');
+          return parser.parse(source, babelOptions);
+        }
       }
-    }
-  });
+    });
+  } catch (parseError) {
+    throw new Error(`Parsing error: ${parseError.message}`);
+  }
 
   const options = {
     cloneInputAst: false,
@@ -39,7 +60,17 @@ async function convertFile(filePath) {
     configFile: false
   };
 
-  const { ast: transformedAST } = transformFromAstSync(ast, content, options);
+  let transformedAST;
+  try {
+    const result = transformFromAstSync(ast, content, options);
+    if (!result || !result.ast) {
+      throw new Error('AST transformation failed');
+    }
+    transformedAST = result.ast;
+  } catch (transformError) {
+    throw new Error(`Transformation error: ${transformError.message}`);
+  }
+
   const result = print(transformedAST).code;
 
   const newFilePath = filePath.replace(/\.ts(x)?$/, '.js$1');

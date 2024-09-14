@@ -4,25 +4,28 @@ import path from 'path';
 import os from 'os';
 
 async function main() {
-  const response = await prompts({
-    type: 'text',
-    name: 'directory',
-    message: 'Enter the directory path to convert:'
-  });
+  try {
+    const response = await prompts({
+      type: 'text',
+      name: 'directory',
+      message: 'Enter the directory path to convert:'
+    });
 
-  let dirPath = response.directory;
+    let dirPath = response.directory;
 
-  // Expand ~ to home directory
-  if (dirPath.startsWith('~')) {
-    dirPath = path.join(os.homedir(), dirPath.slice(1));
+    // Expand ~ to home directory
+    if (dirPath.startsWith('~')) {
+      dirPath = path.join(os.homedir(), dirPath.slice(1));
+    }
+
+    // Resolve relative paths
+    dirPath = path.resolve(dirPath);
+
+    await convertDirectory(dirPath);
+    console.log('Conversion process completed. Check the output for any reported errors.');
+  } catch (error) {
+    console.error('An unexpected error occurred:', error);
   }
-
-  // Resolve relative paths
-  dirPath = path.resolve(dirPath);
-
-  await convertDirectory(dirPath);
-  console.log('Conversion completed successfully!');
 }
 
-main().catch(console.error);
-
+main();
