@@ -27,6 +27,7 @@ export async function convertDirectory(dirPath) {
 
   await removeEnvDTs(dirPath);
   await convertTsConfigToJsConfig(dirPath);
+  await renameRemainingTsFiles(dirPath);
 
   if (errors.length > 0) {
     console.error('\nConversion completed with errors:');
@@ -41,27 +42,27 @@ export async function convertDirectory(dirPath) {
 async function convertFile(filePath) {
   const content = await fs.readFile(filePath, 'utf8');
   let newContent = content;
-  let newFilePath = filePath;
+  let newFilePath = filePath.replace(/\.tsx?$/, '.js');
 
-  if (filePath.endsWith('tsconfig.json')) {
-    newContent = content.replace(/"compilerOptions"/, '"compilerOptions"')
-                        .replace(/"strict":\s*true/, '"checkJs": true');
-    newFilePath = path.join(path.dirname(filePath), 'jsconfig.json');
-  } else if (filePath.endsWith('.astro')) {
-    // Handle .astro files
-    const parts = content.split('---');
-    if (parts.length >= 3) {
-      const frontmatter = parts[1];
-      const template = parts.slice(2).join('---');
-      const convertedFrontmatter = await convertAstroFrontmatter(frontmatter);
-      newContent = `---\n${convertedFrontmatter}\n---\n${template}`;
-    }
-  } else if (filePath.endsWith('.ts') || filePath.endsWith('.tsx')) {
-    // Handle .ts and .tsx files
-    try {
+  try {
+    if (filePath.endsWith('tsconfig.json')) {
+      newContent = content.replace(/"compilerOptions"/, '"compilerOptions"')
+        .replace(/"strict":\s*true/, '"checkJs": true');
+      newFilePath = path.join(path.dirname(filePath), 'jsconfig.json');
+    } else if (filePath.endsWith('.astro')) {
+      // Handle .astro files
+      const parts = content.split('---');
+      if (parts.length >= 3) {
+        const frontmatter = parts[1];
+        const template = parts.slice(2).join('---');
+        const convertedFrontmatter = await convertAstroFrontmatter(frontmatter);
+        newContent = `---\n${convertedFrontmatter}\n---\n${template}`;
+      }
+    } else if (filePath.endsWith('.ts') || filePath.endsWith('.tsx')) {
+      // Handle .ts and .tsx files
       const ast = parser.parse(content, {
         sourceType: 'module',
-        plugins: ['typescript', 'jsx'],
+        plugins: ['typescript', 'jsx', 'importAssertions'],
       });
 
       traverse(ast, {
@@ -154,26 +155,46 @@ async function convertFile(filePath) {
         ExportNamedDeclaration(path) {
           // Convert named exports to module.exports.x = x
           if (path.node.declaration) {
-            const declarations = path.get('declaration').node.declarations;
-            const exportStatements = declarations.map(d =>
-              t.expressionStatement(
-                t.assignmentExpression(
-                  '=',
-                  t.memberExpression(
+            if (t.isVariableDeclaration(path.node.declaration)) {
+              const declarations = path.node.declaration.declarations;
+              const exportStatements = declarations.map(d =>
+                t.expressionStatement(
+                  t.assignmentExpression(
+                    '=',
                     t.memberExpression(
-                      t.identifier('module'),
-                      t.identifier('exports')
+                      t.memberExpression(
+                        t.identifier('module'),
+                        t.identifier('exports')
+                      ),
+                      t.identifier(d.id.name)
                     ),
                     t.identifier(d.id.name)
-                  ),
-                  t.identifier(d.id.name)
+                  )
                 )
-              )
-            );
-            path.replaceWithMultiple([
-              path.node.declaration,
-              ...exportStatements
-            ]);
+              );
+              path.replaceWithMultiple([
+                path.node.declaration,
+                ...exportStatements
+              ]);
+            } else if (t.isFunctionDeclaration(path.node.declaration) || t.isClassDeclaration(path.node.declaration)) {
+              const name = path.node.declaration.id.name;
+              path.replaceWithMultiple([
+                path.node.declaration,
+                t.expressionStatement(
+                  t.assignmentExpression(
+                    '=',
+                    t.memberExpression(
+                      t.memberExpression(
+                        t.identifier('module'),
+                        t.identifier('exports')
+                      ),
+                      t.identifier(name)
+                    ),
+                    t.identifier(name)
+                  )
+                )
+              ]);
+            }
           } else if (path.node.specifiers) {
             const exportStatements = path.node.specifiers.map(s =>
               t.expressionStatement(
@@ -192,14 +213,38 @@ async function convertFile(filePath) {
             );
             path.replaceWithMultiple(exportStatements);
           }
+        },
+        TSTypeAnnotation(path) {
+          // Remove type annotations
+          path.remove();
+        },
+        TSTypeParameterDeclaration(path) {
+          // Remove generic type parameters
+          path.remove();
+        },
+        TSInterfaceDeclaration(path) {
+          // Remove interface declarations
+          path.remove();
+        },
+        TSTypeAliasDeclaration(path) {
+          // Remove type aliases
+          path.remove();
+        },
+        TSAsExpression(path) {
+          // Remove type assertions
+          path.replaceWith(path.node.expression);
+        },
+        TSParameterProperty(path) {
+          // Convert parameter properties to regular parameters
+          path.replaceWith(t.identifier(path.node.parameter.name));
         }
       });
 
       newContent = generate(ast, {}, content).code;
-      newFilePath = filePath.replace(/\.tsx?$/, '.js');
-    } catch (error) {
-      console.error(`Error converting file ${filePath}: ${error.message}`);
     }
+  } catch (error) {
+    console.error(`Error converting file ${filePath}: ${error.message}`);
+    // If there's an error, we'll keep the original content but still change the extension for .ts files
   }
 
   return { content: newContent, newFilePath };
@@ -285,6 +330,30 @@ async function convertAstroFrontmatter(frontmatter) {
         }
       },
       // We don't handle exports in frontmatter as they're not typical
+      TSTypeAnnotation(path) {
+        // Remove type annotations
+        path.remove();
+      },
+      TSTypeParameterDeclaration(path) {
+        // Remove generic type parameters
+        path.remove();
+      },
+      TSInterfaceDeclaration(path) {
+        // Remove interface declarations
+        path.remove();
+      },
+      TSTypeAliasDeclaration(path) {
+        // Remove type aliases
+        path.remove();
+      },
+      TSAsExpression(path) {
+        // Remove type assertions
+        path.replaceWith(path.node.expression);
+      },
+      TSParameterProperty(path) {
+        // Convert parameter properties to regular parameters
+        path.replaceWith(t.identifier(path.node.parameter.name));
+      }
     });
 
     return generate(ast, {}, frontmatter).code;
@@ -308,7 +377,7 @@ async function convertTsConfigToJsConfig(dirPath) {
     const content = await fs.readFile(filePath, 'utf-8');
     const jsConfigPath = path.join(path.dirname(filePath), 'jsconfig.json');
     const newContent = content.replace(/"compilerOptions"/, '"compilerOptions"')
-                              .replace(/"strict":\s*true/, '"checkJs": true');
+      .replace(/"strict":\s*true/, '"checkJs": true');
     await fs.writeFile(jsConfigPath, newContent);
     await fs.unlink(filePath);
   }
@@ -322,6 +391,16 @@ async function getIgnorePatterns(dirPath) {
   } catch (error) {
     console.warn('No .gitignore file found. Proceeding without ignore patterns.');
     return [];
+  }
+}
+
+async function renameRemainingTsFiles(dirPath) {
+  const tsFiles = await glob('**/*.ts', { cwd: dirPath });
+  for (const file of tsFiles) {
+    const oldPath = path.join(dirPath, file);
+    const newPath = oldPath.replace(/\.ts$/, '.js');
+    await fs.rename(oldPath, newPath);
+    console.log(`Renamed: ${oldPath} -> ${newPath}`);
   }
 }
 
