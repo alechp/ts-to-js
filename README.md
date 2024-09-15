@@ -19,12 +19,12 @@ This project provides a tool to convert TypeScript projects to JavaScript, with 
 
 1. Clone the repository:
    ```
-   git clone https://github.com/your-username/ts-to-js-converter.git
+   git clone https://github.com/alechp/ts-to-js
    ```
 
 2. Navigate to the project directory:
    ```
-   cd ts-to-js-converter
+   cd ts-to-js
    ```
 
 3. Install dependencies:
@@ -66,13 +66,3 @@ To use the test script:
    ```
    ./test.sh
    ```
-
-Note: You may need to modify the paths in the script to match your local environment.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## License
-
-This project is licensed under the MIT License.
