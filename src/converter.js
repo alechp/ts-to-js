@@ -1,44 +1,3 @@
-import fs from 'fs/promises';
-import path from 'path';
-import { glob } from 'glob';
-import { parser } from 'recast/parsers/babel.js';
-const traverse = require('@babel/traverse').default;
-const generate = require('@babel/generator').default;
-const t = require('@babel/types');
-
-export async function convertDirectory(dirPath) {
-  const files = await glob('**/*.{ts,tsx,astro,json}', { cwd: dirPath, ignore: await getIgnorePatterns(dirPath) });
-  const errors = [];
-
-  for (const file of files) {
-    const filePath = path.join(dirPath, file);
-    try {
-      const { content, newFilePath } = await convertFile(filePath);
-      await fs.writeFile(newFilePath, content, 'utf8');
-      if (newFilePath !== filePath) {
-        await fs.unlink(filePath);
-      }
-      console.log(`Successfully converted: ${filePath} -> ${newFilePath}`);
-    } catch (error) {
-      console.error(`Error converting ${filePath}: ${error.message}`);
-      errors.push({ file: filePath, error: error.message });
-    }
-  }
-
-  await removeEnvDTs(dirPath);
-  await convertTsConfigToJsConfig(dirPath);
-  await renameRemainingTsFiles(dirPath);
-
-  if (errors.length > 0) {
-    console.error('\nConversion completed with errors:');
-    errors.forEach(({ file, error }) => {
-      console.error(`  ${file}: ${error}`);
-    });
-  } else {
-    console.log('\nAll files converted successfully!');
-  }
-}
-
 async function convertFile(filePath) {
   const content = await fs.readFile(filePath, 'utf8');
   let newContent = content;
@@ -60,8 +19,8 @@ async function convertFile(filePath) {
       }
       // Convert require to import in the entire file
       newContent = newContent.replace(/const\s+(\w+)\s*=\s*require\(([^)]+)\);?/g, 'import $1 from $2;');
-    } else if (filePath.endsWith('.ts') || filePath.endsWith('.tsx')) {
-      // Handle .ts and .tsx files
+    } else if (filePath.endsWith('.ts') || filePath.endsWith('.tsx') || filePath.endsWith('.js')) {
+      // Handle .ts, .tsx, and .js files
       const ast = parser.parse(content, {
         sourceType: 'module',
         plugins: ['typescript', 'jsx', 'importAssertions'],
@@ -69,14 +28,23 @@ async function convertFile(filePath) {
 
       traverse(ast, {
         ImportDeclaration(path) {
-          // Convert import statements
-          const specifiers = path.node.specifiers;
-          const source = path.node.source.value;
-
-          if (specifiers.length === 0) {
-            // Side-effect import, leave as is
+          if (path.node.importKind === 'type' || path.node.specifiers.every(spec => spec.importKind === 'type')) {
+            path.remove();
             return;
           }
+
+          // Remove type specifiers from mixed imports
+          path.node.specifiers = path.node.specifiers.filter(spec => spec.importKind !== 'type');
+
+          // If all specifiers were removed, remove the entire import
+          if (path.node.specifiers.length === 0) {
+            path.remove();
+            return;
+          }
+
+          // Convert remaining import statements to CommonJS require
+          const specifiers = path.node.specifiers;
+          const source = path.node.source.value;
 
           const defaultSpecifier = specifiers.find(s => t.isImportDefaultSpecifier(s));
           const namedSpecifiers = specifiers.filter(s => t.isImportSpecifier(s));
@@ -277,6 +245,15 @@ async function convertFile(filePath) {
     // If there's an error, we'll keep the original content but still change the extension for .ts files
   }
 
+  // Final pass to remove any remaining type imports and exports
+  newContent = newContent.replace(/^\s*import\s+type\s+.*?;\s*$/gm, '');
+  newContent = newContent.replace(/^\s*import\s*{[^}]*}\s*from\s*['"].*?['"];\s*$/gm, '');
+  newContent = newContent.replace(/^\s*export\s+type\s+.*?;\s*$/gm, '');
+  newContent = newContent.replace(/^\s*export\s+interface\s+.*?}\s*$/gm, '');
+
+  // Remove empty lines
+  newContent = newContent.replace(/^\s*[\r\n]/gm, '');
+
   return { content: newContent, newFilePath };
 }
 
@@ -289,6 +266,15 @@ async function convertAstroFrontmatter(frontmatter) {
 
     traverse(ast, {
       ImportDeclaration(path) {
+        if (path.node.importKind === 'type' || path.node.specifiers.every(spec => spec.importKind === 'type')) {
+          // Remove the entire import statement
+          path.remove();
+          return;
+        }
+
+        // For mixed imports, remove type specifiers
+        path.node.specifiers = path.node.specifiers.filter(spec => spec.importKind !== 'type');
+
         // Convert import statements in frontmatter
         const specifiers = path.node.specifiers;
         const source = path.node.source.value;
